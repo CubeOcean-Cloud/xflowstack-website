@@ -1,0 +1,5 @@
+# XFlowStack
+
+> XFlowStack is a multi-functional Discord bot with four main pillars: Automation, Moderation, Transparency, and Integration. It's designed to help Discord server managers automate routine tasks, maintain community security, provide full visibility into service status, and connect to other external systems via APIs/webhooks.
+
+This document helps AI assistants and LLMs quickly and accurately understand the structure of XFlowStack content, including feature documentation, service status, and terms of use.
