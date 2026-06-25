@@ -1,18 +1,9 @@
-import type { Metadata } from "next";
+"use client";
 
-export const metadata: Metadata = {
-  title: "Infrastructure status",
-  description:
-    "Live status for nodes, DNS, and domain checks, plus incident history.",
-  alternates: { canonical: "/status" },
-  openGraph: {
-    title: "Infrastructure status",
-    description: "Live status for nodes, DNS, and domain checks, plus incident history.",
-    url: "/status",
-  },
-};
+import { useEffect, useState } from "react";
 
 const API_BASE = "https://apix.cubeocean.web.id/api/status";
+const POLL_INTERVAL_MS = 60_000; // re-check every 60s, same cadence as the old revalidate
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -65,6 +56,8 @@ type ShardRegion = {
 };
 
 // ─── Fetchers ─────────────────────────────────────────────────────────────────
+// All client-side: no `next.revalidate` (server-only option, invalid here),
+// `cache: "no-store"` instead so every poll gets a fresh read.
 
 async function fetchHealthOverview(): Promise<{
   data: HealthItem[];
@@ -72,7 +65,7 @@ async function fetchHealthOverview(): Promise<{
 }> {
   try {
     const res = await fetch(`${API_BASE}/health/overview`, {
-      next: { revalidate: 60 },
+      cache: "no-store",
     });
     if (!res.ok) return { data: [], grouped: {} };
     const json = await res.json();
@@ -91,7 +84,7 @@ async function fetchChecksOverview(): Promise<{
 }> {
   try {
     const res = await fetch(`${API_BASE}/checks/overview`, {
-      next: { revalidate: 60 },
+      cache: "no-store",
     });
     if (!res.ok) return { data: [], grouped: {} };
     const json = await res.json();
@@ -107,7 +100,7 @@ async function fetchChecksOverview(): Promise<{
 async function fetchIncidents(): Promise<Incident[]> {
   try {
     const res = await fetch(`${API_BASE}/incidents`, {
-      next: { revalidate: 60 },
+      cache: "no-store",
     });
     if (!res.ok) return [];
     const json = await res.json();
@@ -124,13 +117,14 @@ function SlotBar({ slots }: { slots: Slot[] }) {
     <div className="flex gap-px mt-3">
       {slots.map((slot, i) => {
         let bg = "bg-base-border"; // null = no data, grey
-        if (slot.status === "online")   bg = "bg-signal-teal";
+        if (slot.status === "online") bg = "bg-signal-teal";
         if (slot.status === "degraded") bg = "bg-signal-amber";
-        if (slot.status === "offline")  bg = "bg-red-500";
+        if (slot.status === "offline") bg = "bg-red-500";
 
-        const tooltip = slot.status === null
-          ? "No data"
-          : `${new Date(slot.slot_start).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} — ${slot.status}${slot.avg_value ? ` · ${slot.avg_value}ms` : ""}`;
+        const tooltip =
+          slot.status === null
+            ? "No data"
+            : `${new Date(slot.slot_start).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} — ${slot.status}${slot.avg_value ? ` · ${slot.avg_value}ms` : ""}`;
 
         return (
           <div
@@ -198,16 +192,67 @@ function StatusRow({ item }: { item: StatusItem }) {
   );
 }
 
+// ─── Loading skeleton ─────────────────────────────────────────────────────────
+
+function RowSkeleton() {
+  return (
+    <div className="px-6 py-4 border-b border-base-border last:border-b-0">
+      <div className="flex items-center justify-between">
+        <div className="w-2/3">
+          <div className="h-4 w-1/2 animate-pulse rounded bg-base-border" />
+          <div className="mt-2 h-3 w-1/3 animate-pulse rounded bg-base-border" />
+        </div>
+        <div className="h-3 w-16 animate-pulse rounded bg-base-border" />
+      </div>
+      <div className="mt-4 flex gap-px">
+        {Array.from({ length: 12 }).map((_, i) => (
+          <div key={i} className="h-8 flex-1 animate-pulse rounded-sm bg-base-border" />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
-export default async function StatusPage() {
+export default function StatusPage() {
   const SHARD_SUMMARY: ShardRegion[] = []; // TODO: connect to your shard API
 
-  const [healthOverview, checksOverview, incidents] = await Promise.all([
-    fetchHealthOverview(),
-    fetchChecksOverview(),
-    fetchIncidents(),
-  ]);
+  const [healthOverview, setHealthOverview] = useState<{
+    data: HealthItem[];
+    grouped: Grouped<HealthItem>;
+  }>({ data: [], grouped: {} });
+  const [checksOverview, setChecksOverview] = useState<{
+    data: StatusItem[];
+    grouped: Grouped<StatusItem>;
+  }>({ data: [], grouped: {} });
+  const [incidents, setIncidents] = useState<Incident[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadAll() {
+      const [health, checks, incs] = await Promise.all([
+        fetchHealthOverview(),
+        fetchChecksOverview(),
+        fetchIncidents(),
+      ]);
+      if (cancelled) return;
+      setHealthOverview(health);
+      setChecksOverview(checks);
+      setIncidents(incs);
+      setLoading(false);
+    }
+
+    loadAll();
+    const interval = setInterval(loadAll, POLL_INTERVAL_MS);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, []);
 
   const allHealthy =
     healthOverview.data.every((h) => h.is_healthy === 1) &&
@@ -215,24 +260,26 @@ export default async function StatusPage() {
 
   const hasOpenIncidents = incidents.some((i) => i.status === "open");
 
-  const statusLabel = hasOpenIncidents
+  const statusLabel = loading
+    ? "Checking systems"
+    : hasOpenIncidents
     ? "Partial degradation"
     : !allHealthy
     ? "Issues detected"
     : "All systems operational";
 
   const statusColor = allHealthy && !hasOpenIncidents ? "text-signal-teal" : "text-signal-amber";
-  const statusBg    = allHealthy && !hasOpenIncidents
-    ? "border-signal-teal/40 bg-signal-teal/10"
-    : "border-signal-amber/40 bg-signal-amber/10";
-  const statusDot   = allHealthy && !hasOpenIncidents ? "bg-signal-teal" : "bg-signal-amber";
+  const statusBg =
+    allHealthy && !hasOpenIncidents
+      ? "border-signal-teal/40 bg-signal-teal/10"
+      : "border-signal-amber/40 bg-signal-amber/10";
+  const statusDot = allHealthy && !hasOpenIncidents ? "bg-signal-teal" : "bg-signal-amber";
 
-  const healthCategories  = Object.entries(healthOverview.grouped);
-  const checksCategories  = Object.entries(checksOverview.grouped);
+  const healthCategories = Object.entries(healthOverview.grouped);
+  const checksCategories = Object.entries(checksOverview.grouped);
 
   return (
     <div className="mx-auto max-w-6xl px-6 py-20">
-
       {/* Header */}
       <div className="flex flex-col gap-8 border-b border-base-border pb-10 md:flex-row md:items-end md:justify-between">
         <div className="max-w-2xl">
@@ -251,37 +298,44 @@ export default async function StatusPage() {
       </div>
 
       {/* Health checks — grouped by category */}
-      {healthCategories.length > 0 && (
+      {loading ? (
         <div className="mt-14">
           <h2 className="font-display text-xl font-semibold text-ink">Website &amp; API Health</h2>
-          <p className="mt-1 font-body text-sm text-ink-muted">
-            Infrastucture checks
-          </p>
-
-          <div className="mt-6 space-y-8">
-            {healthCategories.map(([category, items]) => (
-              <div key={category}>
-                <h3 className="font-mono text-xs uppercase tracking-wider text-ink-faint mb-3">
-                  {category}
-                </h3>
-                <div className="overflow-hidden rounded-2xl border border-base-border bg-base-raised">
-                  {items.map((item) => (
-                    <HealthRow key={item.id} item={item} />
-                  ))}
-                </div>
-              </div>
-            ))}
+          <p className="mt-1 font-body text-sm text-ink-muted">Infrastucture checks</p>
+          <div className="mt-6 overflow-hidden rounded-2xl border border-base-border bg-base-raised">
+            <RowSkeleton />
+            <RowSkeleton />
           </div>
         </div>
+      ) : (
+        healthCategories.length > 0 && (
+          <div className="mt-14">
+            <h2 className="font-display text-xl font-semibold text-ink">Website &amp; API Health</h2>
+            <p className="mt-1 font-body text-sm text-ink-muted">Infrastucture checks</p>
+
+            <div className="mt-6 space-y-8">
+              {healthCategories.map(([category, items]) => (
+                <div key={category}>
+                  <h3 className="font-mono text-xs uppercase tracking-wider text-ink-faint mb-3">
+                    {category}
+                  </h3>
+                  <div className="overflow-hidden rounded-2xl border border-base-border bg-base-raised">
+                    {items.map((item) => (
+                      <HealthRow key={item.id} item={item} />
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )
       )}
 
       {/* TCP checks — grouped by category */}
-      {checksCategories.length > 0 && (
+      {!loading && checksCategories.length > 0 && (
         <div className="mt-14">
           <h2 className="font-display text-xl font-semibold text-ink">Node &amp; Infrastructure</h2>
-          <p className="mt-1 font-body text-sm text-ink-muted">
-            TCP checks 
-          </p>
+          <p className="mt-1 font-body text-sm text-ink-muted">TCP checks</p>
 
           <div className="mt-6 space-y-8">
             {checksCategories.map(([category, items]) => (
@@ -301,11 +355,9 @@ export default async function StatusPage() {
       )}
 
       {/* Empty state */}
-      {healthCategories.length === 0 && checksCategories.length === 0 && (
+      {!loading && healthCategories.length === 0 && checksCategories.length === 0 && (
         <div className="mt-14 rounded-2xl border border-base-border p-12 text-center">
-          <p className="font-body text-sm text-ink-muted">
-            No data{" "}
-          </p>
+          <p className="font-body text-sm text-ink-muted">No data </p>
         </div>
       )}
 
@@ -322,10 +374,7 @@ export default async function StatusPage() {
                 <p className="mt-2 font-mono text-2xl text-ink">{s.shards}</p>
                 <p className="font-mono text-xs text-ink-faint">shards active</p>
                 <div className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-base-border">
-                  <div
-                    className="h-full rounded-full bg-signal-teal"
-                    style={{ width: s.load }}
-                  />
+                  <div className="h-full rounded-full bg-signal-teal" style={{ width: s.load }} />
                 </div>
                 <p className="mt-1.5 font-mono text-xs text-ink-faint">{s.load} load</p>
               </div>
@@ -342,7 +391,11 @@ export default async function StatusPage() {
       <div className="mt-14">
         <h2 className="font-display text-xl font-semibold text-ink">Incident history</h2>
         <div className="mt-6 space-y-px overflow-hidden rounded-2xl border border-base-border">
-          {incidents.length > 0 ? (
+          {loading ? (
+            <div className="bg-base-raised px-6 py-8 text-center font-body text-sm text-ink-muted">
+              Loading incidents…
+            </div>
+          ) : incidents.length > 0 ? (
             incidents.map((inc) => (
               <div key={inc.id} className="bg-base-raised px-6 py-5">
                 <div className="flex flex-wrap items-center gap-3">
@@ -353,11 +406,15 @@ export default async function StatusPage() {
                       day: "numeric",
                     })}
                   </span>
-                  <span className={`rounded-full border px-2.5 py-0.5 font-mono text-[11px] ${
-                    inc.severity === "critical" ? "border-red-500/40 text-red-400" :
-                    inc.severity === "high"     ? "border-signal-amber/40 text-signal-amber" :
-                    "border-base-border text-ink-muted"
-                  }`}>
+                  <span
+                    className={`rounded-full border px-2.5 py-0.5 font-mono text-[11px] ${
+                      inc.severity === "critical"
+                        ? "border-red-500/40 text-red-400"
+                        : inc.severity === "high"
+                        ? "border-signal-amber/40 text-signal-amber"
+                        : "border-base-border text-ink-muted"
+                    }`}
+                  >
                     {inc.severity}
                   </span>
                   <span className="rounded-full border border-base-border px-2.5 py-0.5 font-mono text-[11px] text-ink-muted">
@@ -375,7 +432,6 @@ export default async function StatusPage() {
           )}
         </div>
       </div>
-
     </div>
   );
 }

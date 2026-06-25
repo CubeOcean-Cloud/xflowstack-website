@@ -1,19 +1,6 @@
-import type { Metadata } from "next";
+"use client";
 
-export const metadata: Metadata = {
-  title: "News & changelog",
-  description:
-    "Releases, infrastructure changes, and fixes shipped to XflowStack — what changed, when, and why.",
-  alternates: {
-    canonical: "/news",
-  },
-  openGraph: {
-    title: "News & changelog — XflowStack",
-    description:
-      "Releases, infrastructure changes, and fixes shipped to XflowStack — what changed, when, and why.",
-    url: "/news",
-  },
-};
+import { useEffect, useState } from "react";
 
 type NewsItem = {
   date: string;
@@ -43,7 +30,7 @@ const CATEGORY_STYLE: Record<string, string> = {
 const API_BASE_URL = "https://apix.cubeocean.web.id/api/news";
 
 function transformApiResponse(apiItem: ApiNewsResponse): NewsItem {
-  const newsItem = {
+  return {
     date: new Date(apiItem.created_at).toLocaleDateString("en-US", {
       year: "numeric",
       month: "short",
@@ -54,9 +41,6 @@ function transformApiResponse(apiItem: ApiNewsResponse): NewsItem {
     excerpt: apiItem.content || "No description available",
     slug: apiItem.slug,
   };
-  
-  console.log("Transformed news item:", newsItem);
-  return newsItem;
 }
 
 async function fetchNewsItems(): Promise<{
@@ -64,44 +48,32 @@ async function fetchNewsItems(): Promise<{
   articles: NewsItem[];
 }> {
   try {
-    // Fetch all news with pagination
+    // Client-side fetch: no `next.revalidate` here — that option only
+    // applies to server-side fetches in Next.js and has no effect (and
+    // is not type-valid) on a fetch running in the browser.
     const response = await fetch(`${API_BASE_URL}?page=1&limit=20`, {
-      next: { revalidate: 60 }, // Cache for 60 seconds only
+      cache: "no-store",
       headers: {
         "Cache-Control": "no-cache",
       },
     });
 
     if (!response.ok) {
-      console.error(`API error: ${response.status} ${response.statusText}`);
       throw new Error(`API error: ${response.status}`);
     }
 
     const result = await response.json();
-    console.log("API Response:", result);
 
     let items: NewsItem[] = [];
 
-    // Handle array response (direct list)
     if (Array.isArray(result)) {
-      items = result.map((item: ApiNewsResponse) =>
-        transformApiResponse(item)
-      );
-    }
-    // Handle paginated response with data property
-    else if (result.data && Array.isArray(result.data)) {
-      items = result.data.map((item: ApiNewsResponse) =>
-        transformApiResponse(item)
-      );
-    }
-    // Handle response with items property
-    else if (result.items && Array.isArray(result.items)) {
-      items = result.items.map((item: ApiNewsResponse) =>
-        transformApiResponse(item)
-      );
+      items = result.map((item: ApiNewsResponse) => transformApiResponse(item));
+    } else if (result.data && Array.isArray(result.data)) {
+      items = result.data.map((item: ApiNewsResponse) => transformApiResponse(item));
+    } else if (result.items && Array.isArray(result.items)) {
+      items = result.items.map((item: ApiNewsResponse) => transformApiResponse(item));
     }
 
-    console.log("Transformed items:", items);
     return {
       featured: items[0] || null,
       articles: items,
@@ -115,8 +87,43 @@ async function fetchNewsItems(): Promise<{
   }
 }
 
-export default async function NewsPage() {
-  const { featured: FEATURED, articles: ARTICLES } = await fetchNewsItems();
+function FeaturedSkeleton() {
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-[1.4fr_1fr]">
+      <div className="p-8 md:p-10">
+        <div className="flex items-center gap-3">
+          <span className="h-5 w-20 animate-pulse rounded-full bg-base-border" />
+          <span className="h-4 w-16 animate-pulse rounded bg-base-border" />
+        </div>
+        <div className="mt-5 h-7 w-3/4 animate-pulse rounded bg-base-border" />
+        <div className="mt-4 h-4 w-full animate-pulse rounded bg-base-border" />
+        <div className="mt-2 h-4 w-2/3 animate-pulse rounded bg-base-border" />
+      </div>
+      <div className="hidden border-l border-base-border bg-base md:block" />
+    </div>
+  );
+}
+
+export default function NewsPage() {
+  const [featured, setFeatured] = useState<NewsItem | null>(null);
+  const [articles, setArticles] = useState<NewsItem[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    fetchNewsItems().then(({ featured, articles }) => {
+      if (cancelled) return;
+      setFeatured(featured);
+      setArticles(articles);
+      setLoading(false);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   return (
     <div className="mx-auto max-w-6xl px-6 py-20">
       <div className="max-w-2xl">
@@ -134,24 +141,26 @@ export default async function NewsPage() {
 
       {/* FEATURED */}
       <div className="mt-14 overflow-hidden rounded-2xl border border-base-border bg-base-raised">
-        {FEATURED ? (
+        {loading ? (
+          <FeaturedSkeleton />
+        ) : featured ? (
           <div className="grid grid-cols-1 md:grid-cols-[1.4fr_1fr]">
             <div className="p-8 md:p-10">
               <div className="flex items-center gap-3">
                 <span
-                  className={`rounded-full border px-2.5 py-0.5 font-mono text-[11px] ${CATEGORY_STYLE[FEATURED.category]}`}
+                  className={`rounded-full border px-2.5 py-0.5 font-mono text-[11px] ${CATEGORY_STYLE[featured.category]}`}
                 >
-                  {FEATURED.category}
+                  {featured.category}
                 </span>
                 <span className="font-mono text-xs text-ink-faint">
-                  {FEATURED.date}
+                  {featured.date}
                 </span>
               </div>
               <h2 className="mt-5 font-display text-2xl font-semibold text-ink md:text-3xl">
-                {FEATURED.title}
+                {featured.title}
               </h2>
               <p className="mt-4 font-body text-sm leading-relaxed text-ink-muted md:text-base">
-                {FEATURED.excerpt}
+                {featured.excerpt}
               </p>
             </div>
             <div className="relative hidden items-center justify-center border-l border-base-border bg-base p-10 md:flex">
@@ -178,11 +187,27 @@ export default async function NewsPage() {
       {/* ARTICLE GRID */}
       <h2 className="sr-only">More updates</h2>
       <div className="mt-16">
-        {ARTICLES.length > 0 ? (
+        {loading ? (
           <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
-            {ARTICLES.map((article) => (
+            {Array.from({ length: 3 }).map((_, i) => (
+              <div
+                key={i}
+                className="rounded-2xl border border-base-border bg-base-raised/40 p-6"
+              >
+                <div className="flex items-center gap-3">
+                  <span className="h-5 w-16 animate-pulse rounded-full bg-base-border" />
+                  <span className="h-4 w-14 animate-pulse rounded bg-base-border" />
+                </div>
+                <div className="mt-4 h-5 w-3/4 animate-pulse rounded bg-base-border" />
+                <div className="mt-3 h-4 w-full animate-pulse rounded bg-base-border" />
+              </div>
+            ))}
+          </div>
+        ) : articles.length > 0 ? (
+          <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
+            {articles.map((article) => (
               <article
-                key={article.title}
+                key={article.slug ?? article.title}
                 className="flex flex-col rounded-2xl border border-base-border bg-base-raised/40 p-6 transition-colors hover:border-base-borderlight"
               >
                 <div className="flex items-center gap-3">
