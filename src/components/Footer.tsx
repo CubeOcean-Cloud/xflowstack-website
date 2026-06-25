@@ -1,4 +1,5 @@
 import Link from "next/link";
+import VersionBadges from "@/components/VersionBadges";
 
 export default function Footer() {
   return (
@@ -18,18 +19,7 @@ export default function Footer() {
               Automation infrastructure for Discord servers that have outgrown
               hobby bots. Built for uptime, not for show.
             </p>
-            <div className="mt-5 flex items-center gap-2 font-mono text-xs text-ink-faint">
-              <span className="h-1.5 w-1.5 rounded-full bg-signal-teal" />
-              Website : backend not ready
-            </div>
-            <div className="mt-5 flex items-center gap-2 font-mono text-xs text-ink-faint">
-              <span className="h-1.5 w-1.5 rounded-full bg-signal-teal" />
-              API : backend not ready
-            </div>
-            <div className="mt-5 flex items-center gap-2 font-mono text-xs text-ink-faint">
-              <span className="h-1.5 w-1.5 rounded-full bg-signal-teal" />
-              Bot : backend not ready
-            </div>
+            <VersionBadges />
           </div>
 
           <div>
@@ -68,7 +58,7 @@ export default function Footer() {
 
         <div className="mt-12 flex flex-col-reverse items-start justify-between gap-4 border-t border-base-border pt-6 md:flex-row md:items-center">
           <p className="font-mono text-xs text-ink-faint">
-            (c) 2026 XflowStack. Developed by CubeOcean. All rights reserved.
+            &copy; 2026 XflowStack. Developed by CubeOcean. All rights reserved.
           </p>
           <div className="flex gap-5 font-mono text-xs text-ink-faint">
             <a href="#" className="hover:text-ink-muted">Discord</a>
