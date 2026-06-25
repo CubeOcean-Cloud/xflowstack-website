@@ -5,6 +5,16 @@ import { useEffect, useState } from "react";
 const API_BASE = "https://apix.cubeocean.web.id/api/status";
 const POLL_INTERVAL_MS = 60_000; // re-check every 60s, same cadence as the old revalidate
 
+// ─── Uptime bar config ─────────────────────────────────────────────────────────
+// 72 boxes covering 24h => each box represents a 20-minute bucket.
+// Checks run every 2 minutes, so each bucket aggregates up to 10 raw results.
+const BUCKET_COUNT = 72;
+const BUCKET_MINUTES = 20;
+const WINDOW_HOURS = 24;
+const CHECK_INTERVAL_MINUTES = 2;
+// Raw results needed to cover the full 24h window at a 2-minute cadence.
+const RESULTS_LIMIT = Math.ceil((WINDOW_HOURS * 60) / CHECK_INTERVAL_MINUTES); // 720
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 // Shapes match the official API docs exactly — no guessing, no fallback chains.
 
@@ -34,6 +44,24 @@ type StatusItem = {
   uptime_24h: number | null;
 };
 
+type HealthResult = {
+  id: number;
+  check_id: number;
+  is_healthy: number;
+  status_code: number | null;
+  response_time_ms: number | null;
+  error: string | null;
+  checked_at: string;
+};
+
+type StatusResult = {
+  id: number;
+  check_id: number;
+  is_online: number;
+  latency_ms: number | null;
+  checked_at: string;
+};
+
 type Incident = {
   id: number;
   title: string;
@@ -45,6 +73,46 @@ type Incident = {
   created_at: string;
   updated_at: string;
 };
+
+// ─── Bucket model ─────────────────────────────────────────────────────────────
+// Every uptime bar renders the same shape regardless of source (health vs
+// TCP checks), so results are normalized to a single "ok" boolean before
+// bucketing.
+
+type BucketStatus = "up" | "down" | "degraded" | "no-data";
+
+type NormalizedResult = {
+  ok: boolean;
+  checked_at: string;
+};
+
+function bucketize(results: NormalizedResult[]): BucketStatus[] {
+  const now = Date.now();
+  const bucketMs = BUCKET_MINUTES * 60_000;
+  const windowMs = WINDOW_HOURS * 60 * 60_000;
+  const windowStart = now - windowMs;
+
+  // buckets[0] = oldest (24h ago), buckets[BUCKET_COUNT - 1] = most recent
+  const buckets: NormalizedResult[][] = Array.from({ length: BUCKET_COUNT }, () => []);
+
+  for (const r of results) {
+    const t = new Date(r.checked_at).getTime();
+    if (Number.isNaN(t) || t < windowStart || t > now) continue;
+    const idx = Math.min(
+      BUCKET_COUNT - 1,
+      Math.floor((t - windowStart) / bucketMs)
+    );
+    buckets[idx].push(r);
+  }
+
+  return buckets.map((bucket) => {
+    if (bucket.length === 0) return "no-data";
+    const upCount = bucket.filter((b) => b.ok).length;
+    if (upCount === bucket.length) return "up";
+    if (upCount === 0) return "down";
+    return "degraded";
+  });
+}
 
 // ─── Grouping ─────────────────────────────────────────────────────────────────
 // The API has no `category` field on health/checks items, so groups are
@@ -112,48 +180,125 @@ async function fetchIncidents(): Promise<Incident[]> {
   }
 }
 
-// ─── Row components ───────────────────────────────────────────────────────────
-// No SlotBar here: the API doesn't return a `slots` timeline array anywhere
-// in the docs, so the per-check timeline bar from the original design isn't
-// backed by real data. Uptime % and latency are shown instead.
+async function fetchHealthResults(id: number): Promise<HealthResult[]> {
+  try {
+    const res = await fetch(`${API_BASE}/health/${id}/results?limit=${RESULTS_LIMIT}`, {
+      cache: "no-store",
+    });
+    if (!res.ok) return [];
+    const json = await res.json();
+    return json.data?.results ?? [];
+  } catch {
+    return [];
+  }
+}
 
-function HealthRow({ item }: { item: HealthItem }) {
+async function fetchCheckResults(id: number): Promise<StatusResult[]> {
+  try {
+    const res = await fetch(`${API_BASE}/checks/${id}/results?limit=${RESULTS_LIMIT}`, {
+      cache: "no-store",
+    });
+    if (!res.ok) return [];
+    const json = await res.json();
+    return json.data?.results ?? [];
+  } catch {
+    return [];
+  }
+}
+
+// ─── Uptime bar ───────────────────────────────────────────────────────────────
+// Renders 72 boxes (20-minute buckets) covering the last 24 hours.
+// Green = up, Red = down, Amber = degraded (mixed), Gray = no data.
+
+const BUCKET_COLOR: Record<BucketStatus, string> = {
+  up: "bg-signal-teal",
+  down: "bg-red-500",
+  degraded: "bg-signal-amber",
+  "no-data": "bg-base-border",
+};
+
+const BUCKET_LABEL: Record<BucketStatus, string> = {
+  up: "Healthy",
+  down: "Down",
+  degraded: "Degraded",
+  "no-data": "No data",
+};
+
+function UptimeBar({ buckets }: { buckets: BucketStatus[] }) {
+  return (
+    <div className="flex items-end gap-[3px]">
+      {buckets.map((status, i) => (
+        <div
+          key={i}
+          title={`${BUCKET_LABEL[status]} · bucket ${i + 1}/${BUCKET_COUNT}`}
+          className={`h-6 w-[5px] flex-1 rounded-sm ${BUCKET_COLOR[status]}`}
+        />
+      ))}
+    </div>
+  );
+}
+
+function UptimeBarSkeleton() {
+  return (
+    <div className="flex items-end gap-[3px]">
+      {Array.from({ length: BUCKET_COUNT }).map((_, i) => (
+        <div key={i} className="h-6 w-[5px] flex-1 animate-pulse rounded-sm bg-base-border" />
+      ))}
+    </div>
+  );
+}
+
+// ─── Row components ───────────────────────────────────────────────────────────
+
+function HealthRow({ item, buckets }: { item: HealthItem; buckets: BucketStatus[] | null }) {
   const healthy = item.is_healthy === 1;
   return (
     <div className="px-6 py-4 border-b border-base-border last:border-b-0">
-      <div className="flex items-center justify-between">
-        <div>
-          <p className="font-body text-sm font-medium text-ink">{item.label}</p>
+      <div className="flex items-center justify-between gap-6">
+        <div className="min-w-[180px]">
+          <div className="flex items-center gap-1.5">
+            <span className={`h-1.5 w-1.5 rounded-full ${healthy ? "bg-signal-teal" : "bg-red-500"}`} />
+            <p className="font-body text-sm font-medium text-ink">{item.label}</p>
+          </div>
           <p className="font-mono text-xs text-ink-faint mt-0.5">
             {item.uptime_24h !== null ? `${item.uptime_24h.toFixed(2)}% uptime` : "No data yet"}
             {item.response_time_ms ? ` · ${item.response_time_ms}ms` : ""}
           </p>
         </div>
-        <span className={`flex items-center gap-1.5 font-mono text-xs ${healthy ? "text-signal-teal" : "text-red-400"}`}>
-          <span className={`h-1.5 w-1.5 rounded-full ${healthy ? "bg-signal-teal" : "bg-red-500"}`} />
-          {healthy ? "Healthy" : "Unhealthy"}
-        </span>
+        <div className="flex-1">
+          {buckets ? <UptimeBar buckets={buckets} /> : <UptimeBarSkeleton />}
+          <div className="mt-1 flex justify-between font-mono text-[10px] text-ink-faint">
+            <span>{WINDOW_HOURS}h ago</span>
+            <span>now</span>
+          </div>
+        </div>
       </div>
     </div>
   );
 }
 
-function StatusRow({ item }: { item: StatusItem }) {
+function StatusRow({ item, buckets }: { item: StatusItem; buckets: BucketStatus[] | null }) {
   const online = item.is_online === 1;
   return (
     <div className="px-6 py-4 border-b border-base-border last:border-b-0">
-      <div className="flex items-center justify-between">
-        <div>
-          <p className="font-body text-sm font-medium text-ink">{item.label}</p>
+      <div className="flex items-center justify-between gap-6">
+        <div className="min-w-[180px]">
+          <div className="flex items-center gap-1.5">
+            <span className={`h-1.5 w-1.5 rounded-full ${online ? "bg-signal-teal" : "bg-red-500"}`} />
+            <p className="font-body text-sm font-medium text-ink">{item.label}</p>
+          </div>
           <p className="font-mono text-xs text-ink-faint mt-0.5">
             {item.uptime_24h !== null ? `${item.uptime_24h.toFixed(2)}% uptime` : "No data yet"}
             {item.latency_ms ? ` · ${item.latency_ms}ms` : ""}
           </p>
         </div>
-        <span className={`flex items-center gap-1.5 font-mono text-xs ${online ? "text-signal-teal" : "text-red-400"}`}>
-          <span className={`h-1.5 w-1.5 rounded-full ${online ? "bg-signal-teal" : "bg-red-500"}`} />
-          {online ? "Online" : "Offline"}
-        </span>
+        <div className="flex-1">
+          {buckets ? <UptimeBar buckets={buckets} /> : <UptimeBarSkeleton />}
+          <div className="mt-1 flex justify-between font-mono text-[10px] text-ink-faint">
+            <span>{WINDOW_HOURS}h ago</span>
+            <span>now</span>
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -162,12 +307,14 @@ function StatusRow({ item }: { item: StatusItem }) {
 function RowSkeleton() {
   return (
     <div className="px-6 py-4 border-b border-base-border last:border-b-0">
-      <div className="flex items-center justify-between">
-        <div className="w-2/3">
-          <div className="h-4 w-1/2 animate-pulse rounded bg-base-border" />
-          <div className="mt-2 h-3 w-1/3 animate-pulse rounded bg-base-border" />
+      <div className="flex items-center justify-between gap-6">
+        <div className="min-w-[180px]">
+          <div className="h-4 w-28 animate-pulse rounded bg-base-border" />
+          <div className="mt-2 h-3 w-20 animate-pulse rounded bg-base-border" />
         </div>
-        <div className="h-3 w-16 animate-pulse rounded bg-base-border" />
+        <div className="flex-1">
+          <UptimeBarSkeleton />
+        </div>
       </div>
     </div>
   );
@@ -179,6 +326,8 @@ export default function StatusPage() {
   const [health, setHealth] = useState<HealthItem[]>([]);
   const [checks, setChecks] = useState<StatusItem[]>([]);
   const [incidents, setIncidents] = useState<Incident[]>([]);
+  const [healthBuckets, setHealthBuckets] = useState<Record<number, BucketStatus[]>>({});
+  const [checkBuckets, setCheckBuckets] = useState<Record<number, BucketStatus[]>>({});
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -191,6 +340,31 @@ export default function StatusPage() {
       setChecks(c);
       setIncidents(i);
       setLoading(false);
+
+      // Histories are fetched after the lists resolve, in parallel, and
+      // applied incrementally per item so bars render progressively
+      // instead of blocking on the slowest one.
+      h.forEach((item) => {
+        fetchHealthResults(item.id).then((results) => {
+          if (cancelled) return;
+          const normalized: NormalizedResult[] = results.map((r) => ({
+            ok: r.is_healthy === 1,
+            checked_at: r.checked_at,
+          }));
+          setHealthBuckets((prev) => ({ ...prev, [item.id]: bucketize(normalized) }));
+        });
+      });
+
+      c.forEach((item) => {
+        fetchCheckResults(item.id).then((results) => {
+          if (cancelled) return;
+          const normalized: NormalizedResult[] = results.map((r) => ({
+            ok: r.is_online === 1,
+            checked_at: r.checked_at,
+          }));
+          setCheckBuckets((prev) => ({ ...prev, [item.id]: bucketize(normalized) }));
+        });
+      });
     }
 
     loadAll();
@@ -267,7 +441,7 @@ export default function StatusPage() {
                   </h3>
                   <div className="overflow-hidden rounded-2xl border border-base-border bg-base-raised">
                     {items.map((item) => (
-                      <HealthRow key={item.id} item={item} />
+                      <HealthRow key={item.id} item={item} buckets={healthBuckets[item.id] ?? null} />
                     ))}
                   </div>
                 </div>
@@ -291,7 +465,7 @@ export default function StatusPage() {
                 </h3>
                 <div className="overflow-hidden rounded-2xl border border-base-border bg-base-raised">
                   {items.map((item) => (
-                    <StatusRow key={item.id} item={item} />
+                    <StatusRow key={item.id} item={item} buckets={checkBuckets[item.id] ?? null} />
                   ))}
                 </div>
               </div>
