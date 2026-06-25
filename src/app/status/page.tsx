@@ -6,139 +6,116 @@ const API_BASE = "https://apix.cubeocean.web.id/api/status";
 const POLL_INTERVAL_MS = 60_000; // re-check every 60s, same cadence as the old revalidate
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-
-type Slot = {
-  slot_start: string;
-  status: "online" | "degraded" | "offline" | null;
-  total: number;
-  up_count: number;
-  avg_value: number | null;
-};
+// Shapes match the official API docs exactly — no guessing, no fallback chains.
 
 type HealthItem = {
   id: number;
+  url: string;
   label: string;
-  category: string;
+  added_by: string;
   is_healthy: number;
   status_code: number | null;
   response_time_ms: number | null;
   last_checked: string | null;
+  created_at: string;
   uptime_24h: number | null;
-  slots: Slot[];
 };
 
 type StatusItem = {
   id: number;
+  host: string;
+  port: number;
   label: string;
-  category: string;
+  added_by: string;
   is_online: number;
   latency_ms: number | null;
   last_checked: string | null;
+  created_at: string;
   uptime_24h: number | null;
-  slots: Slot[];
 };
-
-type Grouped<T> = Record<string, T[]>;
 
 type Incident = {
   id: number;
   title: string;
-  description: string;
   severity: string;
+  description: string;
   status: string;
+  author_id: string;
+  author_name: string;
   created_at: string;
+  updated_at: string;
 };
 
-type ShardRegion = {
-  region: string;
-  shards: number;
-  load: string;
-};
+// ─── Grouping ─────────────────────────────────────────────────────────────────
+// The API has no `category` field on health/checks items, so groups are
+// derived from keywords found in `label` (case-insensitive).
+
+const GROUP_KEYWORDS: { group: string; keywords: string[] }[] = [
+  { group: "API", keywords: ["api"] },
+  { group: "Database", keywords: ["db", "database", "postgres", "mysql", "redis", "mongo"] },
+  { group: "Bot", keywords: ["bot"] },
+  { group: "Website", keywords: ["website", "web", "site", "frontend"] },
+];
+
+function groupForLabel(label: string): string {
+  const lower = label.toLowerCase();
+  for (const { group, keywords } of GROUP_KEYWORDS) {
+    if (keywords.some((kw) => lower.includes(kw))) return group;
+  }
+  return "Other";
+}
+
+function groupByLabel<T extends { label: string }>(items: T[]): Record<string, T[]> {
+  const grouped: Record<string, T[]> = {};
+  for (const item of items) {
+    const group = groupForLabel(item.label);
+    if (!grouped[group]) grouped[group] = [];
+    grouped[group].push(item);
+  }
+  return grouped;
+}
 
 // ─── Fetchers ─────────────────────────────────────────────────────────────────
-// All client-side: no `next.revalidate` (server-only option, invalid here),
-// `cache: "no-store"` instead so every poll gets a fresh read.
+// Correct paths per docs: /api/status/health and /api/status/checks
+// (no "/overview" suffix — that endpoint doesn't exist in this API).
 
-async function fetchHealthOverview(): Promise<{
-  data: HealthItem[];
-  grouped: Grouped<HealthItem>;
-}> {
+async function fetchHealth(): Promise<HealthItem[]> {
   try {
-    const res = await fetch(`${API_BASE}/health/overview`, {
-      cache: "no-store",
-    });
-    if (!res.ok) return { data: [], grouped: {} };
-    const json = await res.json();
-    return {
-      data: json.data || [],
-      grouped: json.grouped || {},
-    };
-  } catch {
-    return { data: [], grouped: {} };
-  }
-}
-
-async function fetchChecksOverview(): Promise<{
-  data: StatusItem[];
-  grouped: Grouped<StatusItem>;
-}> {
-  try {
-    const res = await fetch(`${API_BASE}/checks/overview`, {
-      cache: "no-store",
-    });
-    if (!res.ok) return { data: [], grouped: {} };
-    const json = await res.json();
-    return {
-      data: json.data || [],
-      grouped: json.grouped || {},
-    };
-  } catch {
-    return { data: [], grouped: {} };
-  }
-}
-
-async function fetchIncidents(): Promise<Incident[]> {
-  try {
-    const res = await fetch(`${API_BASE}/incidents`, {
-      cache: "no-store",
-    });
+    const res = await fetch(`${API_BASE}/health`, { cache: "no-store" });
     if (!res.ok) return [];
     const json = await res.json();
-    return json.data || [];
+    return json.data ?? [];
   } catch {
     return [];
   }
 }
 
-// ─── Slot bar component ───────────────────────────────────────────────────────
-
-function SlotBar({ slots }: { slots: Slot[] }) {
-  return (
-    <div className="flex gap-px mt-3">
-      {slots.map((slot, i) => {
-        let bg = "bg-base-border"; // null = no data, grey
-        if (slot.status === "online") bg = "bg-signal-teal";
-        if (slot.status === "degraded") bg = "bg-signal-amber";
-        if (slot.status === "offline") bg = "bg-red-500";
-
-        const tooltip =
-          slot.status === null
-            ? "No data"
-            : `${new Date(slot.slot_start).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} — ${slot.status}${slot.avg_value ? ` · ${slot.avg_value}ms` : ""}`;
-
-        return (
-          <div
-            key={i}
-            title={tooltip}
-            className={`h-8 flex-1 rounded-sm cursor-pointer transition-opacity hover:opacity-70 ${bg}`}
-          />
-        );
-      })}
-    </div>
-  );
+async function fetchChecks(): Promise<StatusItem[]> {
+  try {
+    const res = await fetch(`${API_BASE}/checks`, { cache: "no-store" });
+    if (!res.ok) return [];
+    const json = await res.json();
+    return json.data ?? [];
+  } catch {
+    return [];
+  }
 }
 
-// ─── Row component ────────────────────────────────────────────────────────────
+async function fetchIncidents(): Promise<Incident[]> {
+  try {
+    const res = await fetch(`${API_BASE}/incidents`, { cache: "no-store" });
+    if (!res.ok) return [];
+    const json = await res.json();
+    return json.data ?? [];
+  } catch {
+    return [];
+  }
+}
+
+// ─── Row components ───────────────────────────────────────────────────────────
+// No SlotBar here: the API doesn't return a `slots` timeline array anywhere
+// in the docs, so the per-check timeline bar from the original design isn't
+// backed by real data. Uptime % and latency are shown instead.
 
 function HealthRow({ item }: { item: HealthItem }) {
   const healthy = item.is_healthy === 1;
@@ -157,11 +134,6 @@ function HealthRow({ item }: { item: HealthItem }) {
           {healthy ? "Healthy" : "Unhealthy"}
         </span>
       </div>
-      <div className="flex justify-between mt-1">
-        <span className="font-mono text-[10px] text-ink-faint">4h ago</span>
-        <span className="font-mono text-[10px] text-ink-faint">now</span>
-      </div>
-      <SlotBar slots={item.slots} />
     </div>
   );
 }
@@ -183,16 +155,9 @@ function StatusRow({ item }: { item: StatusItem }) {
           {online ? "Online" : "Offline"}
         </span>
       </div>
-      <div className="flex justify-between mt-1">
-        <span className="font-mono text-[10px] text-ink-faint">4h ago</span>
-        <span className="font-mono text-[10px] text-ink-faint">now</span>
-      </div>
-      <SlotBar slots={item.slots} />
     </div>
   );
 }
-
-// ─── Loading skeleton ─────────────────────────────────────────────────────────
 
 function RowSkeleton() {
   return (
@@ -204,11 +169,6 @@ function RowSkeleton() {
         </div>
         <div className="h-3 w-16 animate-pulse rounded bg-base-border" />
       </div>
-      <div className="mt-4 flex gap-px">
-        {Array.from({ length: 12 }).map((_, i) => (
-          <div key={i} className="h-8 flex-1 animate-pulse rounded-sm bg-base-border" />
-        ))}
-      </div>
     </div>
   );
 }
@@ -216,16 +176,8 @@ function RowSkeleton() {
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function StatusPage() {
-  const SHARD_SUMMARY: ShardRegion[] = []; // TODO: connect to your shard API
-
-  const [healthOverview, setHealthOverview] = useState<{
-    data: HealthItem[];
-    grouped: Grouped<HealthItem>;
-  }>({ data: [], grouped: {} });
-  const [checksOverview, setChecksOverview] = useState<{
-    data: StatusItem[];
-    grouped: Grouped<StatusItem>;
-  }>({ data: [], grouped: {} });
+  const [health, setHealth] = useState<HealthItem[]>([]);
+  const [checks, setChecks] = useState<StatusItem[]>([]);
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -233,15 +185,11 @@ export default function StatusPage() {
     let cancelled = false;
 
     async function loadAll() {
-      const [health, checks, incs] = await Promise.all([
-        fetchHealthOverview(),
-        fetchChecksOverview(),
-        fetchIncidents(),
-      ]);
+      const [h, c, i] = await Promise.all([fetchHealth(), fetchChecks(), fetchIncidents()]);
       if (cancelled) return;
-      setHealthOverview(health);
-      setChecksOverview(checks);
-      setIncidents(incs);
+      setHealth(h);
+      setChecks(c);
+      setIncidents(i);
       setLoading(false);
     }
 
@@ -255,9 +203,7 @@ export default function StatusPage() {
   }, []);
 
   const allHealthy =
-    healthOverview.data.every((h) => h.is_healthy === 1) &&
-    checksOverview.data.every((c) => c.is_online === 1);
-
+    health.every((h) => h.is_healthy === 1) && checks.every((c) => c.is_online === 1);
   const hasOpenIncidents = incidents.some((i) => i.status === "open");
 
   const statusLabel = loading
@@ -275,8 +221,8 @@ export default function StatusPage() {
       : "border-signal-amber/40 bg-signal-amber/10";
   const statusDot = allHealthy && !hasOpenIncidents ? "bg-signal-teal" : "bg-signal-amber";
 
-  const healthCategories = Object.entries(healthOverview.grouped);
-  const checksCategories = Object.entries(checksOverview.grouped);
+  const healthGroups = Object.entries(groupByLabel(health));
+  const checksGroups = Object.entries(groupByLabel(checks));
 
   return (
     <div className="mx-auto max-w-6xl px-6 py-20">
@@ -297,27 +243,27 @@ export default function StatusPage() {
         </div>
       </div>
 
-      {/* Health checks — grouped by category */}
+      {/* Health checks — grouped by label keyword */}
       {loading ? (
         <div className="mt-14">
           <h2 className="font-display text-xl font-semibold text-ink">Website &amp; API Health</h2>
-          <p className="mt-1 font-body text-sm text-ink-muted">Infrastucture checks</p>
+          <p className="mt-1 font-body text-sm text-ink-muted">HTTP/HTTPS checks</p>
           <div className="mt-6 overflow-hidden rounded-2xl border border-base-border bg-base-raised">
             <RowSkeleton />
             <RowSkeleton />
           </div>
         </div>
       ) : (
-        healthCategories.length > 0 && (
+        healthGroups.length > 0 && (
           <div className="mt-14">
             <h2 className="font-display text-xl font-semibold text-ink">Website &amp; API Health</h2>
-            <p className="mt-1 font-body text-sm text-ink-muted">Infrastucture checks</p>
+            <p className="mt-1 font-body text-sm text-ink-muted">HTTP/HTTPS checks</p>
 
             <div className="mt-6 space-y-8">
-              {healthCategories.map(([category, items]) => (
-                <div key={category}>
+              {healthGroups.map(([group, items]) => (
+                <div key={group}>
                   <h3 className="font-mono text-xs uppercase tracking-wider text-ink-faint mb-3">
-                    {category}
+                    {group}
                   </h3>
                   <div className="overflow-hidden rounded-2xl border border-base-border bg-base-raised">
                     {items.map((item) => (
@@ -331,17 +277,17 @@ export default function StatusPage() {
         )
       )}
 
-      {/* TCP checks — grouped by category */}
-      {!loading && checksCategories.length > 0 && (
+      {/* TCP checks — grouped by label keyword */}
+      {!loading && checksGroups.length > 0 && (
         <div className="mt-14">
           <h2 className="font-display text-xl font-semibold text-ink">Node &amp; Infrastructure</h2>
           <p className="mt-1 font-body text-sm text-ink-muted">TCP checks</p>
 
           <div className="mt-6 space-y-8">
-            {checksCategories.map(([category, items]) => (
-              <div key={category}>
+            {checksGroups.map(([group, items]) => (
+              <div key={group}>
                 <h3 className="font-mono text-xs uppercase tracking-wider text-ink-faint mb-3">
-                  {category}
+                  {group}
                 </h3>
                 <div className="overflow-hidden rounded-2xl border border-base-border bg-base-raised">
                   {items.map((item) => (
@@ -355,37 +301,11 @@ export default function StatusPage() {
       )}
 
       {/* Empty state */}
-      {!loading && healthCategories.length === 0 && checksCategories.length === 0 && (
+      {!loading && healthGroups.length === 0 && checksGroups.length === 0 && (
         <div className="mt-14 rounded-2xl border border-base-border p-12 text-center">
-          <p className="font-body text-sm text-ink-muted">No data </p>
+          <p className="font-body text-sm text-ink-muted">No data</p>
         </div>
       )}
-
-      {/* Shard distribution */}
-      <div className="mt-14">
-        <h2 className="font-display text-xl font-semibold text-ink">
-          Shard distribution by region
-        </h2>
-        <div className="mt-6 grid grid-cols-1 gap-px overflow-hidden rounded-2xl border border-base-border bg-base-border sm:grid-cols-2 lg:grid-cols-5">
-          {SHARD_SUMMARY.length > 0 ? (
-            SHARD_SUMMARY.map((s) => (
-              <div key={s.region} className="bg-base-raised p-5">
-                <p className="font-body text-sm text-ink-muted">{s.region}</p>
-                <p className="mt-2 font-mono text-2xl text-ink">{s.shards}</p>
-                <p className="font-mono text-xs text-ink-faint">shards active</p>
-                <div className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-base-border">
-                  <div className="h-full rounded-full bg-signal-teal" style={{ width: s.load }} />
-                </div>
-                <p className="mt-1.5 font-mono text-xs text-ink-faint">{s.load} load</p>
-              </div>
-            ))
-          ) : (
-            <div className="col-span-full rounded-b-2xl bg-base-raised p-8 text-center font-body text-sm text-ink-muted">
-              Shard distribution data is not available.
-            </div>
-          )}
-        </div>
-      </div>
 
       {/* Incidents */}
       <div className="mt-14">

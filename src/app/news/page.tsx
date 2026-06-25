@@ -48,42 +48,25 @@ async function fetchNewsItems(): Promise<{
   articles: NewsItem[];
 }> {
   try {
-    // Client-side fetch: no `next.revalidate` here — that option only
-    // applies to server-side fetches in Next.js and has no effect (and
-    // is not type-valid) on a fetch running in the browser.
     const response = await fetch(`${API_BASE_URL}?page=1&limit=20`, {
       cache: "no-store",
-      headers: {
-        "Cache-Control": "no-cache",
-      },
     });
 
     if (!response.ok) {
-      throw new Error(`API error: ${response.status}`);
+      return { featured: null, articles: [] };
     }
 
-    const result = await response.json();
+    const json = await response.json();
 
-    let items: NewsItem[] = [];
-
-    if (Array.isArray(result)) {
-      items = result.map((item: ApiNewsResponse) => transformApiResponse(item));
-    } else if (result.data && Array.isArray(result.data)) {
-      items = result.data.map((item: ApiNewsResponse) => transformApiResponse(item));
-    } else if (result.items && Array.isArray(result.items)) {
-      items = result.items.map((item: ApiNewsResponse) => transformApiResponse(item));
-    }
+    // API always returns { success, items: [...], pagination }
+    const items: NewsItem[] = (json.items ?? []).map(transformApiResponse);
 
     return {
-      featured: items[0] || null,
+      featured: items[0] ?? null,
       articles: items,
     };
-  } catch (error) {
-    console.error("Failed to fetch news items:", error);
-    return {
-      featured: null,
-      articles: [],
-    };
+  } catch {
+    return { featured: null, articles: [] };
   }
 }
 
