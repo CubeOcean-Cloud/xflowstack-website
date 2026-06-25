@@ -81,19 +81,26 @@ type Incident = {
 
 type BucketStatus = "up" | "down" | "degraded" | "no-data";
 
+type Bucket = {
+  status: BucketStatus;
+  startTime: number; // epoch ms
+  endTime: number; // epoch ms
+  count: number; // raw results aggregated into this bucket
+};
+
 type NormalizedResult = {
   ok: boolean;
   checked_at: string;
 };
 
-function bucketize(results: NormalizedResult[]): BucketStatus[] {
+function bucketize(results: NormalizedResult[]): Bucket[] {
   const now = Date.now();
   const bucketMs = BUCKET_MINUTES * 60_000;
   const windowMs = WINDOW_HOURS * 60 * 60_000;
   const windowStart = now - windowMs;
 
-  // buckets[0] = oldest (24h ago), buckets[BUCKET_COUNT - 1] = most recent
-  const buckets: NormalizedResult[][] = Array.from({ length: BUCKET_COUNT }, () => []);
+  // raw[0] = oldest (24h ago), raw[BUCKET_COUNT - 1] = most recent
+  const raw: NormalizedResult[][] = Array.from({ length: BUCKET_COUNT }, () => []);
 
   for (const r of results) {
     const t = new Date(r.checked_at).getTime();
@@ -102,16 +109,46 @@ function bucketize(results: NormalizedResult[]): BucketStatus[] {
       BUCKET_COUNT - 1,
       Math.floor((t - windowStart) / bucketMs)
     );
-    buckets[idx].push(r);
+    raw[idx].push(r);
   }
 
-  return buckets.map((bucket) => {
-    if (bucket.length === 0) return "no-data";
-    const upCount = bucket.filter((b) => b.ok).length;
-    if (upCount === bucket.length) return "up";
-    if (upCount === 0) return "down";
-    return "degraded";
+  return raw.map((bucket, i) => {
+    const startTime = windowStart + i * bucketMs;
+    const endTime = startTime + bucketMs;
+
+    let status: BucketStatus;
+    if (bucket.length === 0) {
+      status = "no-data";
+    } else {
+      const upCount = bucket.filter((b) => b.ok).length;
+      status = upCount === bucket.length ? "up" : upCount === 0 ? "down" : "degraded";
+    }
+
+    return { status, startTime, endTime, count: bucket.length };
   });
+}
+
+// ─── Time formatting ──────────────────────────────────────────────────────────
+// Shows a date prefix only when the bucket's day differs from today, so the
+// common case (today) stays compact: "14:20–14:40". Crossing midnight shows
+// "Jun 24, 23:40–00:00".
+
+function formatBucketRange(startTime: number, endTime: number): string {
+  const start = new Date(startTime);
+  const end = new Date(endTime);
+  const now = new Date();
+
+  const timeFmt = (d: Date) =>
+    d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }); // "14:20"
+
+  const isToday = start.toDateString() === now.toDateString();
+  const startStr = timeFmt(start);
+  const endStr = timeFmt(end);
+
+  if (isToday) return `${startStr}\u2013${endStr}`;
+
+  const dateFmt = start.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  return `${dateFmt}, ${startStr}\u2013${endStr}`;
 }
 
 // ─── Grouping ─────────────────────────────────────────────────────────────────
@@ -224,14 +261,17 @@ const BUCKET_LABEL: Record<BucketStatus, string> = {
   "no-data": "No data",
 };
 
-function UptimeBar({ buckets }: { buckets: BucketStatus[] }) {
+function UptimeBar({ buckets }: { buckets: Bucket[] }) {
   return (
     <div className="flex items-end gap-[3px]">
-      {buckets.map((status, i) => (
+      {buckets.map((bucket, i) => (
         <div
           key={i}
-          title={`${BUCKET_LABEL[status]} · bucket ${i + 1}/${BUCKET_COUNT}`}
-          className={`h-6 w-[5px] flex-1 rounded-sm ${BUCKET_COLOR[status]}`}
+          title={`${BUCKET_LABEL[bucket.status]} \u00b7 ${formatBucketRange(
+            bucket.startTime,
+            bucket.endTime
+          )}`}
+          className={`h-6 w-[5px] flex-1 rounded-sm ${BUCKET_COLOR[bucket.status]}`}
         />
       ))}
     </div>
@@ -250,7 +290,7 @@ function UptimeBarSkeleton() {
 
 // ─── Row components ───────────────────────────────────────────────────────────
 
-function HealthRow({ item, buckets }: { item: HealthItem; buckets: BucketStatus[] | null }) {
+function HealthRow({ item, buckets }: { item: HealthItem; buckets: Bucket[] | null }) {
   const healthy = item.is_healthy === 1;
   return (
     <div className="px-6 py-4 border-b border-base-border last:border-b-0">
@@ -277,7 +317,7 @@ function HealthRow({ item, buckets }: { item: HealthItem; buckets: BucketStatus[
   );
 }
 
-function StatusRow({ item, buckets }: { item: StatusItem; buckets: BucketStatus[] | null }) {
+function StatusRow({ item, buckets }: { item: StatusItem; buckets: Bucket[] | null }) {
   const online = item.is_online === 1;
   return (
     <div className="px-6 py-4 border-b border-base-border last:border-b-0">
@@ -326,8 +366,8 @@ export default function StatusPage() {
   const [health, setHealth] = useState<HealthItem[]>([]);
   const [checks, setChecks] = useState<StatusItem[]>([]);
   const [incidents, setIncidents] = useState<Incident[]>([]);
-  const [healthBuckets, setHealthBuckets] = useState<Record<number, BucketStatus[]>>({});
-  const [checkBuckets, setCheckBuckets] = useState<Record<number, BucketStatus[]>>({});
+  const [healthBuckets, setHealthBuckets] = useState<Record<number, Bucket[]>>({});
+  const [checkBuckets, setCheckBuckets] = useState<Record<number, Bucket[]>>({});
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
