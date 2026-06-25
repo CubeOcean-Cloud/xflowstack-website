@@ -93,6 +93,31 @@ type NormalizedResult = {
   checked_at: string;
 };
 
+// ─── Timestamp parsing ─────────────────────────────────────────────────────────
+// The API returns "checked_at" as "YYYY-MM-DD HH:mm:ss" with no "T" and no
+// timezone offset (see docs: "2026-06-23 10:00:00"). That shape is outside
+// ISO 8601, so `new Date(...)` parses it inconsistently across engines —
+// some treat it as UTC, others as the browser's local time, and some return
+// Invalid Date. The server stores/returns these in UTC, so we parse the
+// pieces ourselves and build the UTC instant explicitly. Display formatting
+// (toLocaleTimeString etc.) is left to do its normal job of converting that
+// instant to whatever timezone the user's device is set to.
+function parseServerTimestamp(value: string): number {
+  const match = value.match(
+    /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/
+  );
+  if (!match) return NaN;
+  const [, y, mo, d, h, mi, s] = match;
+  return Date.UTC(
+    Number(y),
+    Number(mo) - 1,
+    Number(d),
+    Number(h),
+    Number(mi),
+    Number(s)
+  );
+}
+
 function bucketize(results: NormalizedResult[]): Bucket[] {
   const now = Date.now();
   const bucketMs = BUCKET_MINUTES * 60_000;
@@ -103,7 +128,7 @@ function bucketize(results: NormalizedResult[]): Bucket[] {
   const raw: NormalizedResult[][] = Array.from({ length: BUCKET_COUNT }, () => []);
 
   for (const r of results) {
-    const t = new Date(r.checked_at).getTime();
+    const t = parseServerTimestamp(r.checked_at);
     if (Number.isNaN(t) || t < windowStart || t > now) continue;
     const idx = Math.min(
       BUCKET_COUNT - 1,
@@ -129,8 +154,11 @@ function bucketize(results: NormalizedResult[]): Bucket[] {
 }
 
 // ─── Time formatting ──────────────────────────────────────────────────────────
-// Shows a date prefix only when the bucket's day differs from today, so the
-// common case (today) stays compact: "14:20–14:40". Crossing midnight shows
+// Renders in the viewer's own device timezone (no `timeZone` override passed
+// to Intl), so two people in different countries see different wall-clock
+// times for the same bucket — which is the correct behavior. Shows a date
+// prefix only when the bucket's day differs from today, so the common case
+// (today) stays compact: "14:20–14:40". Crossing midnight shows
 // "Jun 24, 23:40–00:00".
 
 function formatBucketRange(startTime: number, endTime: number): string {
@@ -139,7 +167,7 @@ function formatBucketRange(startTime: number, endTime: number): string {
   const now = new Date();
 
   const timeFmt = (d: Date) =>
-    d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }); // "14:20"
+    d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 
   const isToday = start.toDateString() === now.toDateString();
   const startStr = timeFmt(start);
@@ -147,7 +175,7 @@ function formatBucketRange(startTime: number, endTime: number): string {
 
   if (isToday) return `${startStr}\u2013${endStr}`;
 
-  const dateFmt = start.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  const dateFmt = start.toLocaleDateString(undefined, { month: "short", day: "numeric" });
   return `${dateFmt}, ${startStr}\u2013${endStr}`;
 }
 
@@ -263,26 +291,31 @@ const BUCKET_LABEL: Record<BucketStatus, string> = {
 
 function UptimeBar({ buckets }: { buckets: Bucket[] }) {
   return (
-    <div className="flex items-end gap-[3px]">
-      {buckets.map((bucket, i) => (
-        <div
-          key={i}
-          title={`${BUCKET_LABEL[bucket.status]} \u00b7 ${formatBucketRange(
-            bucket.startTime,
-            bucket.endTime
-          )}`}
-          className={`h-6 w-[5px] flex-1 rounded-sm ${BUCKET_COLOR[bucket.status]}`}
-        />
-      ))}
+    <div className="overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+      <div className="flex h-6 items-end gap-[2px] sm:gap-[3px]">
+        {buckets.map((bucket, i) => (
+          <div
+            key={i}
+            title={`${BUCKET_LABEL[bucket.status]} \u00b7 ${formatBucketRange(
+              bucket.startTime,
+              bucket.endTime
+            )}`}
+            className={`h-6 w-[6px] shrink-0 rounded-sm sm:w-auto sm:flex-1 ${BUCKET_COLOR[bucket.status]}`}
+          />
+        ))}
+      </div>
     </div>
   );
 }
 
 function UptimeBarSkeleton() {
   return (
-    <div className="flex items-end gap-[3px]">
+    <div className="flex h-6 items-end gap-[2px] overflow-hidden sm:gap-[3px]">
       {Array.from({ length: BUCKET_COUNT }).map((_, i) => (
-        <div key={i} className="h-6 w-[5px] flex-1 animate-pulse rounded-sm bg-base-border" />
+        <div
+          key={i}
+          className="h-6 w-[6px] shrink-0 animate-pulse rounded-sm bg-base-border sm:w-auto sm:flex-1"
+        />
       ))}
     </div>
   );
@@ -293,19 +326,19 @@ function UptimeBarSkeleton() {
 function HealthRow({ item, buckets }: { item: HealthItem; buckets: Bucket[] | null }) {
   const healthy = item.is_healthy === 1;
   return (
-    <div className="px-6 py-4 border-b border-base-border last:border-b-0">
-      <div className="flex items-center justify-between gap-6">
-        <div className="min-w-[180px]">
+    <div className="px-4 py-4 border-b border-base-border last:border-b-0 sm:px-6">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-6">
+        <div className="sm:min-w-[180px] sm:shrink-0">
           <div className="flex items-center gap-1.5">
-            <span className={`h-1.5 w-1.5 rounded-full ${healthy ? "bg-signal-teal" : "bg-red-500"}`} />
-            <p className="font-body text-sm font-medium text-ink">{item.label}</p>
+            <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${healthy ? "bg-signal-teal" : "bg-red-500"}`} />
+            <p className="font-body text-sm font-medium text-ink truncate">{item.label}</p>
           </div>
           <p className="font-mono text-xs text-ink-faint mt-0.5">
             {item.uptime_24h !== null ? `${item.uptime_24h.toFixed(2)}% uptime` : "No data yet"}
             {item.response_time_ms ? ` · ${item.response_time_ms}ms` : ""}
           </p>
         </div>
-        <div className="flex-1">
+        <div className="min-w-0 flex-1">
           {buckets ? <UptimeBar buckets={buckets} /> : <UptimeBarSkeleton />}
           <div className="mt-1 flex justify-between font-mono text-[10px] text-ink-faint">
             <span>{WINDOW_HOURS}h ago</span>
@@ -320,19 +353,19 @@ function HealthRow({ item, buckets }: { item: HealthItem; buckets: Bucket[] | nu
 function StatusRow({ item, buckets }: { item: StatusItem; buckets: Bucket[] | null }) {
   const online = item.is_online === 1;
   return (
-    <div className="px-6 py-4 border-b border-base-border last:border-b-0">
-      <div className="flex items-center justify-between gap-6">
-        <div className="min-w-[180px]">
+    <div className="px-4 py-4 border-b border-base-border last:border-b-0 sm:px-6">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-6">
+        <div className="sm:min-w-[180px] sm:shrink-0">
           <div className="flex items-center gap-1.5">
-            <span className={`h-1.5 w-1.5 rounded-full ${online ? "bg-signal-teal" : "bg-red-500"}`} />
-            <p className="font-body text-sm font-medium text-ink">{item.label}</p>
+            <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${online ? "bg-signal-teal" : "bg-red-500"}`} />
+            <p className="font-body text-sm font-medium text-ink truncate">{item.label}</p>
           </div>
           <p className="font-mono text-xs text-ink-faint mt-0.5">
             {item.uptime_24h !== null ? `${item.uptime_24h.toFixed(2)}% uptime` : "No data yet"}
             {item.latency_ms ? ` · ${item.latency_ms}ms` : ""}
           </p>
         </div>
-        <div className="flex-1">
+        <div className="min-w-0 flex-1">
           {buckets ? <UptimeBar buckets={buckets} /> : <UptimeBarSkeleton />}
           <div className="mt-1 flex justify-between font-mono text-[10px] text-ink-faint">
             <span>{WINDOW_HOURS}h ago</span>
@@ -346,13 +379,13 @@ function StatusRow({ item, buckets }: { item: StatusItem; buckets: Bucket[] | nu
 
 function RowSkeleton() {
   return (
-    <div className="px-6 py-4 border-b border-base-border last:border-b-0">
-      <div className="flex items-center justify-between gap-6">
-        <div className="min-w-[180px]">
+    <div className="px-4 py-4 border-b border-base-border last:border-b-0 sm:px-6">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-6">
+        <div className="sm:min-w-[180px] sm:shrink-0">
           <div className="h-4 w-28 animate-pulse rounded bg-base-border" />
           <div className="mt-2 h-3 w-20 animate-pulse rounded bg-base-border" />
         </div>
-        <div className="flex-1">
+        <div className="min-w-0 flex-1">
           <UptimeBarSkeleton />
         </div>
       </div>
@@ -439,27 +472,27 @@ export default function StatusPage() {
   const checksGroups = Object.entries(groupByLabel(checks));
 
   return (
-    <div className="mx-auto max-w-6xl px-6 py-20">
+    <div className="mx-auto max-w-6xl px-4 py-10 sm:px-6 sm:py-20">
       {/* Header */}
-      <div className="flex flex-col gap-8 border-b border-base-border pb-10 md:flex-row md:items-end md:justify-between">
+      <div className="flex flex-col gap-6 border-b border-base-border pb-8 sm:gap-8 sm:pb-10 md:flex-row md:items-end md:justify-between">
         <div className="max-w-2xl">
           <p className="font-mono text-xs uppercase tracking-wider text-signal-teal">Status</p>
-          <h1 className="mt-4 font-display text-4xl font-semibold text-ink md:text-5xl">
+          <h1 className="mt-3 font-display text-3xl font-semibold text-ink sm:mt-4 sm:text-4xl md:text-5xl">
             Infrastructure, in the open
           </h1>
-          <p className="mt-5 font-body text-base leading-relaxed text-ink-muted">
+          <p className="mt-4 font-body text-sm leading-relaxed text-ink-muted sm:mt-5 sm:text-base">
             Every domain check and node we run, refreshed every minute.
           </p>
         </div>
-        <div className={`flex items-center gap-3 rounded-full border ${statusBg} px-4 py-2.5`}>
-          <span className={`h-2 w-2 animate-pulse rounded-full ${statusDot}`} />
+        <div className={`flex items-center gap-3 self-start rounded-full border ${statusBg} px-4 py-2.5 md:self-auto`}>
+          <span className={`h-2 w-2 shrink-0 animate-pulse rounded-full ${statusDot}`} />
           <span className={`font-mono text-sm ${statusColor}`}>{statusLabel}</span>
         </div>
       </div>
 
       {/* Health checks — grouped by label keyword */}
       {loading ? (
-        <div className="mt-14">
+        <div className="mt-10 sm:mt-14">
           <h2 className="font-display text-xl font-semibold text-ink">Website &amp; API Health</h2>
           <p className="mt-1 font-body text-sm text-ink-muted">HTTP/HTTPS checks</p>
           <div className="mt-6 overflow-hidden rounded-2xl border border-base-border bg-base-raised">
@@ -469,7 +502,7 @@ export default function StatusPage() {
         </div>
       ) : (
         healthGroups.length > 0 && (
-          <div className="mt-14">
+          <div className="mt-10 sm:mt-14">
             <h2 className="font-display text-xl font-semibold text-ink">Website &amp; API Health</h2>
             <p className="mt-1 font-body text-sm text-ink-muted">HTTP/HTTPS checks</p>
 
@@ -493,7 +526,7 @@ export default function StatusPage() {
 
       {/* TCP checks — grouped by label keyword */}
       {!loading && checksGroups.length > 0 && (
-        <div className="mt-14">
+        <div className="mt-10 sm:mt-14">
           <h2 className="font-display text-xl font-semibold text-ink">Node &amp; Infrastructure</h2>
           <p className="mt-1 font-body text-sm text-ink-muted">TCP checks</p>
 
@@ -516,29 +549,32 @@ export default function StatusPage() {
 
       {/* Empty state */}
       {!loading && healthGroups.length === 0 && checksGroups.length === 0 && (
-        <div className="mt-14 rounded-2xl border border-base-border p-12 text-center">
+        <div className="mt-10 rounded-2xl border border-base-border p-8 text-center sm:mt-14 sm:p-12">
           <p className="font-body text-sm text-ink-muted">No data</p>
         </div>
       )}
 
       {/* Incidents */}
-      <div className="mt-14">
+      <div className="mt-10 sm:mt-14">
         <h2 className="font-display text-xl font-semibold text-ink">Incident history</h2>
         <div className="mt-6 space-y-px overflow-hidden rounded-2xl border border-base-border">
           {loading ? (
-            <div className="bg-base-raised px-6 py-8 text-center font-body text-sm text-ink-muted">
+            <div className="bg-base-raised px-4 py-8 text-center font-body text-sm text-ink-muted sm:px-6">
               Loading incidents…
             </div>
           ) : incidents.length > 0 ? (
             incidents.map((inc) => (
-              <div key={inc.id} className="bg-base-raised px-6 py-5">
+              <div key={inc.id} className="bg-base-raised px-4 py-5 sm:px-6">
                 <div className="flex flex-wrap items-center gap-3">
                   <span className="font-mono text-xs text-ink-faint">
-                    {new Date(inc.created_at).toLocaleDateString("en-US", {
-                      year: "numeric",
-                      month: "short",
-                      day: "numeric",
-                    })}
+                    {new Date(parseServerTimestamp(inc.created_at)).toLocaleDateString(
+                      undefined,
+                      {
+                        year: "numeric",
+                        month: "short",
+                        day: "numeric",
+                      }
+                    )}
                   </span>
                   <span
                     className={`rounded-full border px-2.5 py-0.5 font-mono text-[11px] ${
@@ -560,7 +596,7 @@ export default function StatusPage() {
               </div>
             ))
           ) : (
-            <div className="bg-base-raised px-6 py-8 text-center font-body text-sm text-ink-muted">
+            <div className="bg-base-raised px-4 py-8 text-center font-body text-sm text-ink-muted sm:px-6">
               No incidents recorded.
             </div>
           )}
